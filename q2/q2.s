@@ -1,4 +1,4 @@
-    .data
+.data
 space_str:
     .string " "
 newline_str:
@@ -17,6 +17,7 @@ fmt_int:
 # 3. Print space-separated result
 # ============================================================
 main:
+    # Function prologue: set up stack frame and save callee-saved registers
     pushq   %rbp
     movq    %rsp, %rbp
     pushq   %rbx
@@ -25,162 +26,177 @@ main:
     pushq   %r14
     pushq   %r15
 
-    # argc in %edi, argv in %rsi
-    movl    %edi, %r12d             # r12d = argc
-    movq    %rsi, %r13              # r13 = argv
+    # argc in %edi, argv in %rsi (x86-64 System V ABI)
+    movl    %edi, %r12d             # r12d = argc (save for later)
+    movq    %rsi, %r13              # r13 = argv (save for later)
 
-    # n = argc - 1 (number of elements)
+    # n = argc - 1 (number of elements to process, excluding program name)
     movl    %r12d, %r14d
     subl    $1, %r14d               # r14d = n
 
-    # If n <= 0, just exit
+    # If n <= 0, no elements to process, just exit
     testl   %r14d, %r14d
     jle     .main_exit
 
     # Allocate arr[n] on stack (each int = 4 bytes)
+    # Convert n to 64-bit for address calculations
     movslq  %r14d, %r15             # r15 = n (64-bit)
-    leaq    0(,%r15,4), %rax        # rax = n * 4
-    subq    %rax, %rsp
-    # Align stack to 16 bytes
+    leaq    0(,%r15,4), %rax        # rax = n * 4 (bytes needed)
+    subq    %rax, %rsp              # allocate array on stack (grows downward)
+    # Align stack to 16 bytes after allocation (required for future calls like atoi, printf)
     andq    $-16, %rsp
-    movq    %rsp, %rbx              # rbx = arr base pointer
+    movq    %rsp, %rbx              # rbx = base pointer of arr array
 
-    # Parse argv[1..n] into arr
-    xorl    %ecx, %ecx              # ecx = i = 0
+    # Parse argv[1] through argv[n] into arr[0] through arr[n-1]
+    xorl    %ecx, %ecx              # ecx = i = 0 (loop counter)
 .parse_loop:
-    cmpl    %r14d, %ecx
-    jge     .parse_done
+    cmpl    %r14d, %ecx             # compare i with n
+    jge     .parse_done             # if i >= n, done parsing
 
-    subq    $8, %rsp                # maintain 16-byte alignment
-    pushq   %rcx                    # save i
-    # argv[i+1]
+    # Save alignment before calling atoi (which follows C calling convention)
+    subq    $8, %rsp                # maintain 16-byte alignment (compensate for push)
+    pushq   %rcx                    # save i on stack (caller-saved across atoi)
+
+    # argv[i+1] because argv[0] is program name
     movl    %ecx, %eax
-    addl    $1, %eax
-    movslq  %eax, %rax
-    movq    (%r13,%rax,8), %rdi     # rdi = argv[i+1]
-    call    atoi
+    addl    $1, %eax                # i+1
+    movslq  %eax, %rax              # 64-bit index
+    movq    (%r13,%rax,8), %rdi     # rdi = argv[i+1] (first argument to atoi)
+    call    atoi                    # atoi returns integer in %eax
+
     popq    %rcx                    # restore i
     addq    $8, %rsp                # restore alignment
 
     movl    %eax, (%rbx,%rcx,4)     # arr[i] = atoi(argv[i+1])
-    incl    %ecx
+    incl    %ecx                    # i++
     jmp     .parse_loop
 
 .parse_done:
-    # Allocate result[n] on stack (each int = 4 bytes)
-    leaq    0(,%r15,4), %rax
-    subq    %rax, %rsp
-    andq    $-16, %rsp
-    movq    %rsp, %r12              # r12 = result base pointer
+    # Allocate result[n] on stack (same size as arr)
+    leaq    0(,%r15,4), %rax        # rax = n * 4
+    subq    %rax, %rsp              # allocate result array
+    andq    $-16, %rsp              # maintain 16-byte alignment
+    movq    %rsp, %r12              # r12 = base pointer of result array
 
-    # Initialize result[i] = -1 for all i
-    xorl    %ecx, %ecx
+    # Initialize result[i] = -1 for all i (default when no greater element exists)
+    xorl    %ecx, %ecx              # i = 0
 .init_result:
-    cmpl    %r14d, %ecx
-    jge     .init_done
-    movl    $-1, (%r12,%rcx,4)
-    incl    %ecx
+    cmpl    %r14d, %ecx             # compare i with n
+    jge     .init_done              # if i >= n, done
+    movl    $-1, (%r12,%rcx,4)      # result[i] = -1
+    incl    %ecx                    # i++
     jmp     .init_result
 
 .init_done:
-    # Allocate stack[n] on the actual stack (indices, each int = 4 bytes)
-    leaq    0(,%r15,4), %rax
-    subq    %rax, %rsp
-    andq    $-16, %rsp
-    movq    %rsp, %r13              # r13 = stack base pointer
+    # Allocate stack[n] on the stack (stores indices, each int = 4 bytes)
+    # This stack will hold indices of elements waiting to find their next greater element
+    leaq    0(,%r15,4), %rax        # rax = n * 4
+    subq    %rax, %rsp              # allocate stack array
+    andq    $-16, %rsp              # maintain 16-byte alignment
+    movq    %rsp, %r13              # r13 = base pointer of stack array
 
-    # stack_top = -1 (empty stack; stack_top stored in r15d, reuse r15)
-    # But r15 was n. Save n in a different place.
-    # Let's use: r14d = n, r15d = stack_top
-    movl    $-1, %r15d              # r15d = stack_top = -1
+    # stack_top = -1 (empty stack; r15d will be reused for stack top)
+    # Note: r15 previously held n (64-bit), but now we reuse r15d for stack top
+    movl    $-1, %r15d              # r15d = stack_top = -1 (empty stack)
 
-    # for (i = n-1; i >= 0; i--)
-    movl    %r14d, %ecx
-    subl    $1, %ecx                # ecx = i = n-1
+    # Main algorithm: iterate from right to left (n-1 down to 0)
+    # This is efficient because we can maintain a monotonic decreasing stack
+    movl    %r14d, %ecx             # ecx = n
+    subl    $1, %ecx                # ecx = i = n-1 (start from last element)
 
 .algo_loop:
-    cmpl    $0, %ecx
-    jl      .algo_done
+    cmpl    $0, %ecx                # compare i with 0
+    jl      .algo_done              # if i < 0, done
 
-    # while (stack_top >= 0 && arr[stack.top()] <= arr[i]) stack.pop()
+    # While stack is not empty AND arr[stack.top()] <= arr[i], pop from stack
+    # This maintains a strictly decreasing stack (from bottom to top)
+    # Reason: we want the next greater element, so smaller or equal elements are useless
 .while_loop:
-    cmpl    $0, %r15d
-    jl      .while_done             # stack empty
+    cmpl    $0, %r15d               # compare stack_top with 0
+    jl      .while_done             # if stack_top < 0 (stack empty), exit loop
 
-    # stack.top() = stack[stack_top]
-    movslq  %r15d, %rax
+    # Get the index at the top of the stack
+    movslq  %r15d, %rax             # rax = stack_top (64-bit index)
     movl    (%r13,%rax,4), %edx     # edx = stack[stack_top] (index j)
 
-    # arr[j] vs arr[i]
-    movl    (%rbx,%rdx,4), %eax     # eax = arr[j]
-    movl    (%rbx,%rcx,4), %esi     # esi = arr[i]
+    # Compare arr[j] with arr[i]
+    movl    (%rbx,%rdx,4), %eax     # eax = arr[j] (value at index j)
+    movl    (%rbx,%rcx,4), %esi     # esi = arr[i] (value at index i)
     cmpl    %esi, %eax
-    jg      .while_done             # arr[j] > arr[i], stop
+    jg      .while_done             # if arr[j] > arr[i], stop popping (found candidate)
 
-    # pop: stack_top--
-    decl    %r15d
-    jmp     .while_loop
+    # arr[j] <= arr[i]: this element cannot be the next greater for i or any earlier element
+    # Pop it by decrementing stack_top (logical removal)
+    decl    %r15d                   # stack_top--
+    jmp     .while_loop             # continue checking new top
 
 .while_done:
-    # if (!stack.empty()) result[i] = stack.top()
-    cmpl    $0, %r15d
-    jl      .skip_assign
+    # If stack is not empty, the top of stack contains the index of the next greater element
+    cmpl    $0, %r15d               # check if stack is empty
+    jl      .skip_assign            # if empty, result[i] remains -1
 
-    movslq  %r15d, %rax
-    movl    (%r13,%rax,4), %eax     # eax = stack[stack_top]
+    # stack not empty: result[i] = stack.top() (the index of next greater element)
+    movslq  %r15d, %rax             # rax = stack_top (64-bit)
+    movl    (%r13,%rax,4), %eax     # eax = stack[stack_top] (index)
     movl    %eax, (%r12,%rcx,4)     # result[i] = stack.top()
 
 .skip_assign:
-    # stack.push(i): stack_top++; stack[stack_top] = i
-    incl    %r15d
-    movslq  %r15d, %rax
+    # Push current index i onto the stack (as a candidate for previous elements)
+    # First increment stack_top, then store i at that position
+    incl    %r15d                   # stack_top++
+    movslq  %r15d, %rax             # rax = stack_top (64-bit)
     movl    %ecx, (%r13,%rax,4)     # stack[stack_top] = i
 
-    decl    %ecx                    # i--
+    decl    %ecx                    # i-- (move left to next element)
     jmp     .algo_loop
 
 .algo_done:
-    # Print result: space-separated
+    # Print result array as space-separated integers
     xorl    %ecx, %ecx              # ecx = i = 0
 .print_loop:
-    cmpl    %r14d, %ecx
-    jge     .print_done
+    cmpl    %r14d, %ecx             # compare i with n
+    jge     .print_done             # if i >= n, done printing
 
-    subq    $8, %rsp                # maintain 16-byte alignment
-    pushq   %rcx                    # save i
+    # Save alignment before calling printf
+    subq    $8, %rsp                # maintain 16-byte alignment for printf
+    pushq   %rcx                    # save i on stack (printf may clobber)
 
-    # Print space before element (if not first)
-    testl   %ecx, %ecx              # changed: use register directly
-    jz      .skip_space
+    # Print space before element (if not the first element, i != 0)
+    testl   %ecx, %ecx              # check if i == 0
+    jz      .skip_space             # if i == 0, skip printing space
 
-    leaq    space_str(%rip), %rdi
-    xorl    %eax, %eax
+    # Print a single space character
+    leaq    space_str(%rip), %rdi   # first argument: format string " "
+    xorl    %eax, %eax              # no vector registers used (clear for varargs)
     call    printf
 
 .skip_space:
-    movq    (%rsp), %rcx            # restore i (peek)
+    # Restore i from stack (peek without popping)
+    movq    (%rsp), %rcx            # restore i (saved value from pushq %rcx)
+    
     # Print result[i]
-    leaq    fmt_int(%rip), %rdi
-    movl    (%r12,%rcx,4), %esi
-    xorl    %eax, %eax
+    leaq    fmt_int(%rip), %rdi     # first argument: format string "%d"
+    movl    (%r12,%rcx,4), %esi     # second argument: result[i]
+    xorl    %eax, %eax              # clear eax (no vector registers for varargs)
     call    printf
 
-    popq    %rcx                    # restore i
+    popq    %rcx                    # restore i (remove from stack)
     addq    $8, %rsp                # restore alignment
 
-    incl    %ecx
+    incl    %ecx                    # i++
     jmp     .print_loop
 
 .print_done:
-    # Print newline
-    leaq    newline_str(%rip), %rdi
-    xorl    %eax, %eax
+    # Print newline character to end the output line
+    leaq    newline_str(%rip), %rdi # format string "\n"
+    xorl    %eax, %eax              # no vector registers
     call    printf
 
 .main_exit:
-    # Restore stack frame
-    # We did multiple subq from rsp, but we saved rbp
-    leaq    -40(%rbp), %rsp
+    # Restore stack frame: undo all stack allocations
+    # We allocated arr, result, and stack on the stack, plus saved registers
+    # The stack pointer was modified multiple times; we restore by moving back to saved %rbp
+    leaq    -40(%rbp), %rsp         # -40 because we pushed 5 registers (8*5 = 40 bytes)
     popq    %r15
     popq    %r14
     popq    %r13
@@ -188,5 +204,5 @@ main:
     popq    %rbx
     popq    %rbp
 
-    xorl    %eax, %eax
+    xorl    %eax, %eax              # return 0 (success)
     ret
