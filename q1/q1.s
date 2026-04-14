@@ -18,12 +18,6 @@ make_node:
     pushq   %rbx
     
     # Align stack to 16 bytes as required by the x86-64 ABI before a call.
-    # We pushed %rbp (8 bytes) and %rbx (8 bytes) = 16 bytes total,
-    # so stack is already aligned. But we need space for future calls?
-    # Actually, after pushes, %rsp is 16 bytes less than entry. To call malloc
-    # we need %rsp % 16 == 0 before the call. Since we have two pushes (16 bytes),
-    # subtract 8 more to realign? Wait: entry: %rsp % 16 = 8 (typical). Push %rbp: -8 => %rsp % 16 = 0.
-    # Push %rbx: -8 => %rsp % 16 = 8 again. So we need to subtract 8 to make it 0.
     subq    $8, %rsp        # align stack to 16 bytes for malloc
     
     # Save the input parameter (val) in %ebx because %edi will be overwritten by malloc's argument

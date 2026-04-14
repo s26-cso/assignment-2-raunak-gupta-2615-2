@@ -36,7 +36,7 @@ int main() {
         snprintf(libpath, sizeof(libpath), "./lib%s.so", op);
 
         // Dynamically load the shared library at runtime
-        // RTLD_LAZY: resolve symbols only when they are actually used (performance optimization)
+        // resolve symbols only when they are actually used (performance optimization)
         // The library is expected to be in the current working directory
         handle = dlopen(libpath, RTLD_LAZY);
         
